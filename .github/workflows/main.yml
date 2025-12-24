@@ -1,0 +1,95 @@
+name: Sync to feature/finance-ui and Create PR
+
+# Run manually or when main is updated
+on:
+  workflow_dispatch: {}
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-and-create-pr:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: true
+
+      - name: Set up git user
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create / reset feature branch locally
+        run: |
+          TARGET_BRANCH="feature/finance-ui"
+          # Create or reset local branch to the current ref (e.g. main)
+          git checkout -B "${TARGET_BRANCH}"
+
+      - name: Add all files
+        run: git add -A
+
+      - name: Commit changes (if any)
+        id: commit
+        run: |
+          if git diff --staged --quiet; then
+            echo "no_changes=true" >> $GITHUB_OUTPUT
+            echo "No changes to commit."
+          else
+            git commit -m "Sync repo to ${GITHUB_REF#refs/heads/} -> feature/finance-ui [ci skip]"
+            echo "no_changes=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Push feature branch to remote
+        if: steps.commit.outputs.no_changes == 'false' || always()
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Force-push the feature branch to ensure it matches current state
+          git push --force "https://x-access-token:${GITHUB_TOKEN}@github.com/${{ github.repository }}" HEAD:feature/finance-ui
+
+      - name: Create Pull Request (if one doesn't already exist)
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Shell-safe variables
+          REPO="${GITHUB_REPOSITORY}"
+          OWNER="$(echo ${REPO} | cut -d/ -f1)"
+          TARGET_BRANCH="feature/finance-ui"
+          BASE_BRANCH="main"
+          TITLE="Add finance-tracker UI (Vite + React)"
+          BODY="Automated sync from ${GITHUB_REF#refs/heads/} to ${TARGET_BRANCH}."
+
+          # Check for existing open PR from TARGET_BRANCH -> BASE_BRANCH
+          EXISTING_PR_COUNT=$(curl -s -H "Authorization: token ${GITHUB_TOKEN}" \
+            "https://api.github.com/repos/${REPO}/pulls?head=${OWNER}:${TARGET_BRANCH}&base=${BASE_BRANCH}&state=open" \
+            | grep -c '"number"')
+
+          if [ "${EXISTING_PR_COUNT}" -gt 0 ]; then
+            echo "An open PR from ${TARGET_BRANCH} to ${BASE_BRANCH} already exists. Skipping PR creation."
+            exit 0
+          fi
+
+          # Create a new PR
+          echo "Creating pull request ${TARGET_BRANCH} -> ${BASE_BRANCH}..."
+          curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${REPO}/pulls" \
+            -d "$(jq -n --arg t "$TITLE" --arg h "$TARGET_BRANCH" --arg b "$BASE_BRANCH" --arg bd "$BODY" '{title:$t, head:$h, base:$b, body:$bd}')" \
+          | tee pr_response.json
+
+          PR_URL=$(jq -r '.html_url // empty' pr_response.json || true)
+          if [ -n "$PR_URL" ]; then
+            echo "PR created: $PR_URL"
+          else
+            echo "Failed to create PR. Response:"
+            cat pr_response.json
+            exit 1
+          fi
+        # jq is available on ubuntu-latest by default; if not, you can install it:
+        # run: sudo apt-get update && sudo apt-get install -y jq
